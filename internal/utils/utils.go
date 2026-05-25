@@ -51,9 +51,10 @@ func CreateFile(filename string) *AutoCloseFile {
 	}
 
 	// Set up finalizer to ensure file is closed if Close() isn't called
-	runtime.SetFinalizer(&AutoCloseFile{file}, (*AutoCloseFile).Close)
+	autoCloseFile := &AutoCloseFile{file}
+	runtime.SetFinalizer(autoCloseFile, (*AutoCloseFile).Close)
 
-	return &AutoCloseFile{file}
+	return autoCloseFile
 }
 
 func DeduplicateLinks(links []string) []string {
@@ -203,7 +204,7 @@ func CapitalizeFirstLetter(s string) string {
 // NewGitHubClient creates an authenticated HTTP client with optimized transport
 func NewGitHubClient(token string) *http.Client {
 	transport := models.OptimizedTransport()
-	
+
 	return &http.Client{
 		Timeout: constants.HttpTimeout,
 		Transport: &models.AuthTransport{

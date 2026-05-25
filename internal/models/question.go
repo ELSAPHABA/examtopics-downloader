@@ -6,6 +6,7 @@ type QuestionData struct {
 	Content      string
 	Questions    []string
 	Answer       string
+	AnswerImages []string
 	Timestamp    string
 	QuestionLink string
 	Comments     string

@@ -3,11 +3,16 @@ package utils
 import (
 	"bufio"
 	"bytes"
-	"regexp"
 	"examtopics-downloader/internal/models"
 	"fmt"
+	"html"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/mandolyte/mdtopdf"
@@ -38,6 +43,7 @@ func WriteData(dataList []models.QuestionData, outputPath string, commentBool bo
 	fmt.Fprintf(file, "# Exam Topics Questions\n\n")
 	fmt.Fprintf(file, "@thatonecodes\n\n")
 
+	answerImageCount := 0
 	for _, data := range dataList {
 		if data.Title == "" {
 			continue
@@ -54,7 +60,25 @@ func WriteData(dataList []models.QuestionData, outputPath string, commentBool bo
 			fmt.Fprintf(file, "%s\n\n", question)
 		}
 
-		fmt.Fprintf(file, "**Answer: %s**\n\n", data.Answer)
+		answerImageURLs := getAnswerImageURLs(data)
+		if len(answerImageURLs) > 0 {
+			fmt.Fprintf(file, "**Answer:**\n\n")
+			if strings.TrimSpace(data.Answer) != "" && extractImageURLFromAnswer(data.Answer) == "" {
+				fmt.Fprintf(file, "%s\n\n", data.Answer)
+			}
+			for _, answerImageURL := range answerImageURLs {
+				answerImageCount++
+				answerImagePath := answerImageURL
+				if downloadedPath, err := downloadAnswerImage(answerImageURL, outputPath, answerImageCount); err != nil {
+					log.Printf("failed to download answer image %s: %v", answerImageURL, err)
+				} else {
+					answerImagePath = downloadedPath
+				}
+				fmt.Fprintf(file, "![Answer](%s)\n\n", answerImagePath)
+			}
+		} else {
+			fmt.Fprintf(file, "**Answer: %s**\n\n", data.Answer)
+		}
 		fmt.Fprintf(file, "**Timestamp: %s**\n\n", data.Timestamp)
 		fmt.Fprintf(file, "[View on ExamTopics](%s)\n\n", data.QuestionLink)
 
@@ -121,6 +145,109 @@ func WriteData(dataList []models.QuestionData, outputPath string, commentBool bo
 		}
 		deleteMarkdownFile(outputPath)
 	}
+}
+
+func getAnswerImageURLs(data models.QuestionData) []string {
+	seen := make(map[string]struct{})
+	var imageURLs []string
+
+	if answerImageURL := extractImageURLFromAnswer(data.Answer); answerImageURL != "" {
+		seen[answerImageURL] = struct{}{}
+		imageURLs = append(imageURLs, answerImageURL)
+	}
+
+	for _, answerImageURL := range data.AnswerImages {
+		answerImageURL = extractImageURLFromAnswer(answerImageURL)
+		if answerImageURL == "" {
+			continue
+		}
+		if _, exists := seen[answerImageURL]; exists {
+			continue
+		}
+		seen[answerImageURL] = struct{}{}
+		imageURLs = append(imageURLs, answerImageURL)
+	}
+
+	return imageURLs
+}
+
+func extractImageURLFromAnswer(answer string) string {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return ""
+	}
+
+	if match := regexp.MustCompile(`(?i)<img[^>]+src=["']([^"']+)["']`).FindStringSubmatch(answer); len(match) == 2 {
+		answer = strings.TrimSpace(match[1])
+	}
+	if match := regexp.MustCompile(`!\[[^\]]*\]\(([^)]+)\)`).FindStringSubmatch(answer); len(match) == 2 {
+		answer = strings.TrimSpace(match[1])
+	}
+	answer = html.UnescapeString(answer)
+
+	parsedURL, err := url.Parse(answer)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return ""
+	}
+
+	ext := strings.ToLower(filepath.Ext(parsedURL.Path))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+		return answer
+	default:
+		return ""
+	}
+}
+
+func downloadAnswerImage(imageURL, outputPath string, imageNumber int) (string, error) {
+	parsedURL, err := url.Parse(imageURL)
+	if err != nil {
+		return "", err
+	}
+
+	outputDir := filepath.Dir(outputPath)
+	outputBase := strings.TrimSuffix(filepath.Base(outputPath), filepath.Ext(outputPath))
+	imageDirName := outputBase + "_answer_images"
+	imageDir := filepath.Join(outputDir, imageDirName)
+	if err := os.MkdirAll(imageDir, 0755); err != nil {
+		return "", err
+	}
+
+	ext := strings.ToLower(filepath.Ext(parsedURL.Path))
+	if ext == "" {
+		ext = ".png"
+	}
+	fileName := fmt.Sprintf("answer-%03d%s", imageNumber, ext)
+	imagePath := filepath.Join(imageDir, fileName)
+
+	req, err := http.NewRequest(http.MethodGet, imageURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+
+	resp, err := NewHTTPClient().Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code %d", resp.StatusCode)
+	}
+
+	file, err := os.Create(imagePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	if _, err := io.Copy(file, resp.Body); err != nil {
+		return "", err
+	}
+
+	relativePath := filepath.ToSlash(filepath.Join(imageDirName, fileName))
+	return strings.ReplaceAll(relativePath, " ", "%20"), nil
 }
 
 func mdToHTML(md []byte) ([]byte, error) {
